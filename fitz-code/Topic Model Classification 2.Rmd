@@ -1,0 +1,280 @@
+---
+title: 'Week 10: Clustering and Modeling'
+author: "Ben Schmidt"
+date: "4/2/2015"
+output: pdf_document
+---
+
+
+``` {r global_options, include=FALSE}
+install.packages("knitr")
+install.packages("RJavaTools")
+library(knitr)
+opts_chunk$set(eval=FALSE, warning=FALSE, message=FALSE)
+
+```
+
+# Topic Modeling
+
+
+Clustering and Modeling
+
+To do topic modelling at home, you'll install the "mallet" package for R.
+
+**Note: this depends on the rJava package, which some people may have trouble installing. If `install.packages("mallet")` doesn't work on your machine, write the list for help.**
+
+This code is mostly taken verbatim from David Mimno--just the names of the stoplist file and the tsv file to read in have changed.
+
+``` {r}
+install.packages("mallet")
+library(mallet)
+
+
+clustersForTM = withGenres[,c("V1","V9","Genre.1")] %>% filter(nchar(as.character(V9), allowNA=TRUE) > 50) #Get the Cluster Number and text column from Cluster frame
+clustersForTM = data.frame(Cluster=as.character(withGenres$V1),Text=as.character(withGenres$V9),Genre=as.character(withGenres$Genre.1),stringsAsFactors = F)
+
+input=clustersForTM
+
+n.topics=25
+
+mallet.instances <- mallet.import(input$Cluster, input$Text, stoplist.file="data/stopwords.txt", token.regexp = "\\w+",preserve.case=F)
+                                 
+
+topic.model <- MalletLDA(num.topics=n.topics)
+topic.model$loadDocuments(mallet.instances)
+
+#Look at the word frequencies sorted in order.
+vocabulary <- topic.model$getVocabulary()
+word.freqs <- mallet.word.freqs(topic.model)
+head(word.freqs)
+
+#Some preferences. Inside baseball: see Wallach and Mimno for what's going on.
+topic.model$setAlphaOptimization(20, 50)
+topic.model$train(300)
+#Increase the fit without changing the topic distribution; optional
+topic.model$maximize(10)
+
+#Gets a list of the documents and topics
+doc.topics <- mallet.doc.topics(topic.model, smoothed=T, normalized=T)
+#Changes the orientation of that matrix to be horizontal:
+topic.docs <- t(doc.topics)
+
+#Gets a list of the top words.
+topic.words <- mallet.topic.words(topic.model, smoothed=T, normalized=T)
+
+
+#Assign some labels to the topics
+topics.labels <- rep("", n.topics)
+for (topic in 1:n.topics) {
+  topics.labels[topic] <- paste(
+    mallet.top.words(topic.model, topic.words[topic,], num.top.words=5)$words, collapse=" "
+)}
+topics.labels
+#to look at the labels, type "topics.labels"
+
+rownames(doc.topics) = input$Cluster
+colnames(doc.topics) = topics.labels
+```
+
+Schmidt's classifying on topics (http://bookworm.benschmidt.org/posts/2015-09-14-Classifying_genre.html)
+
+```{r}
+
+#Create a dataframe with all topics for clusters that have hand-tagged genres
+topicsDF = doc.topics %>% as.data.frame() %>% mutate(cluster = input$Cluster, primary_genre = input$Genre) %>% filter(primary_genre!="Unknown")
+
+#Create a dataframe for all topics for clusters with unknown genres
+topics_Unknown = doc.topics %>% as.data.frame() %>% mutate(cluster = input$Cluster, primary_genre = input$Genre) %>% filter(primary_genre =="Unknown")
+
+#Convert to a matrix
+modeling_matrix = topicsDF %>% select(-primary_genre, -cluster)
+modeling_matrix = log(modeling_matrix)
+
+#Create a matrix for all topics for clusters with unknown genres
+unclassified_data = doc.topics %>% as.data.frame() %>% mutate(cluster = input$Cluster, primary_genre = input$Genre) %>% filter(primary_genre=="Unknown") %>% select(-primary_genre,-cluster) %>% log
+
+#Create a training set
+should_be_training = sample(c(TRUE,FALSE),nrow(modeling_matrix),replace=T,prob = c(.75,.25))
+
+#Convert training set into dataframe
+training_frame = data.frame(modeling_matrix[should_be_training,])
+training_frame$match = NA
+
+#Build a model using GLM
+build_model = function(genre,model_function=glm,...) {
+  # genre is a string indicating one of the primary_genre fields;
+  # model function is something like "glm" or "svm";
+  # are further arguments passed to that function.
+  training_frame$match=as.numeric(topicsDF$primary_genre == genre)[should_be_training]
+  # we model against a matrix: the columns are the topics, which we get by dropping out the other four elements
+  match_ratio = sum(as.numeric(training_frame$match))/length(training_frame$match)
+  model = model_function(match ~ ., training_frame,...,weights = ifelse(match,1/match_ratio,1/(1-match_ratio)))
+}
+
+#Visualize top ten (filter_to_top) genres
+filter_to_top = 10
+topicsDF %>% 
+  filter(should_be_training) %>% 
+  group_by(primary_genre) %>% 
+  summarize(cluster=n()) %>% 
+  mutate(rank=rank(-cluster)) %>% 
+  arrange(rank) %>% 
+  ggplot() + 
+  geom_bar(aes(y=cluster,x=reorder(primary_genre,cluster),fill=primary_genre),stat="identity") + 
+  coord_flip() + 
+  labs(title="Most common genres, by number of clusters in training set")
+
+#Create a value of the top genres. 
+top_genres = topicsDF %>% group_by(primary_genre) %>% summarize(cluster=n()) %>% mutate(rank=rank(-cluster)) %>% arrange(rank) %>% slice(1:filter_to_top) %>% select(primary_genre) %>% unlist
+
+top_genres
+
+#Create models
+models = lapply(top_genres,build_model,glm,family=binomial)
+
+# Here's where we predict on out-of-model data.
+predictions = lapply(models,predict,newdata = data.frame(modeling_matrix[!should_be_training,]),type="response")
+
+# Convert to dataframe with scores for each genre  
+predictions_frame = do.call(cbind,predictions) %>% as.data.frame()
+names(predictions_frame) = top_genres
+
+# Add cluster number and primary genre
+predictions_frame = cbind(topicsDF %>% select(cluster,primary_genre) %>% filter(!should_be_training),predictions_frame)
+
+# Tidied data frame
+tidied = predictions_frame %>% gather("classified_genre","probability",-primary_genre,-cluster)
+
+
+
+# Create a data frame with top probability for each cluster
+best_guesses = tidied %>% group_by(cluster) %>% 
+  arrange(-probability) %>% slice(1) %>% # (Only take the top probability for each episode)
+  mutate(actual_genre=primary_genre)
+ 
+confusion = best_guesses %>% group_by(actual_genre,classified_genre) %>% summarize(`count`=n())
+ggplot(confusion) + geom_point(aes(y=classified_genre,x=count)) + facet_wrap(~actual_genre)
+
+confusion %>% group_by(actual_genre) %>% summarize(percent_right = 100 * sum(count[actual_genre==classified_genre])/sum(count)) %>% arrange(-percent_right)
+
+confusion %>% group_by(1) %>% summarize(percent_right = 100 * sum(count[actual_genre==classified_genre])/sum(count)) %>% arrange(-percent_right)
+
+
+genreClass %>% 
+  group_by(classified_genre) %>% 
+  summarize(cluster=n()) %>% 
+  mutate(rank=rank(-cluster)) %>% 
+  arrange(rank) %>% 
+  ggplot() + 
+  geom_bar(aes(y=cluster,x=reorder(classified_genre,cluster),fill=classified_genre),stat="identity") + 
+  coord_flip() + 
+  labs(title="Most common guessed genres, by number of clusters")
+
+
+#How is the classifier performing on topics?
+
+top_predictors = lapply(1:length(top_genres),function(n,return_length=15) {
+  comedy_model = models[n][[1]]
+  using = (rank((comedy_model$coefficients))<=(return_length/2)) | (rank(-comedy_model$coefficients)<=(return_length/2))
+  coefficients = data.frame(genre = top_genres[n],topic=names(comedy_model$coefficients[using]) %>% gsub("modeling_matrix","",.),strength = comedy_model$coefficients[using],row.names = NULL)
+  coefficients
+}) %>% rbind_all
+
+ggplot(top_predictors %>% filter(topic!="(Intercept)")) + geom_point(aes(x=strength,y=topic,color=strength>0)) + facet_wrap(~genre,scales="free",ncol=3)
+
+
+
+
+# Here's where we predict on out-of-model data.
+# Work on this, still nto working quite right
+
+
+
+out_of_domain_predictions = lapply(models,predict,newdata = data.frame(unclassified_data),type="response")
+
+  
+out_of_domain_predictions_frame = do.call(cbind,out_of_domain_predictions) %>% as.data.frame()
+names(out_of_domain_predictions_frame) = top_genres
+
+out_of_domain_predictions_frame = cbind(topics_Unknown %>% select(cluster,primary_genre),out_of_domain_predictions_frame)
+
+out_of_domain_predictions_tidied = out_of_domain_predictions_frame %>% gather("classified_genre","probability",-primary_genre,-cluster)
+
+out_of_domain_predictions_best_guesses = out_of_domain_predictions_tidied %>% group_by(cluster) %>% 
+  arrange(-probability) %>% slice(1) %>% # (Only take the top probability for each episode)
+  mutate(actual_genre=primary_genre)
+
+genreClass = out_of_domain_predictions_best_guesses %>% mutate(Cluster = cluster) %>% left_join(clustersForTM) 
+write.csv(genreClass, file = paste('output/genreClass-2-3-16.csv',sep=""))
+
+justVignettes = genreClass %>% filter(classified_genre=="vignette") %>% select(-Cluster, -actual_genre, -Genre)
+justVignettes = justVignettes %>% mutate(V9 = Text) %>% inner_join(halfCluster) %>% select(cluster, primary_genre, classified_genre, probability, Text, V6, V3)
+justVignettes = justVignettes %>% mutate(url = V6) %>% select(-V6)
+write.csv(justVignettes, file = paste('output/justVignettes-1-27-16.csv',sep=""))
+
+#Vignettes by year (work on this... create year column)
+justVignettes = justVignettes %>%
+  mutate(year=gsub(".*(\\d{4}).*","\\1",V3)) %>%
+  mutate("year" = as.numeric(year)) %>%
+  group_by(year) %>%
+  mutate(count=n()) %>% 
+  ungroup 
+
+  ggplot(justVignettes) +
+  geom_line() +
+  aes(x=year,y=count) + 
+  geom_point(size=count,alpha=.8) + 
+  ggtitle("Number of vignettes published by year")
+  
+#other genres by year
+genreClass = genreClass %>% mutate(V9 = Text) %>% inner_join(halfCluster) %>% select(cluster, primary_genre, classified_genre, probability, Text, V6, V3)  
+  
+genretoGraph = "political"
+genreClass %>%
+  mutate(year=gsub(".*(\\d{4}).*","\\1",V3)) %>%
+  mutate("year" = as.numeric(year)) %>%
+  group_by(year) %>%
+  mutate(count=n()) %>% 
+  ungroup %>%
+  filter(classified_genre==genretoGraph) %>%
+  ggplot() +
+  geom_line() +
+  aes(x=year,y=count) + 
+  geom_point(size=count,alpha=.8) + 
+  ggtitle("Number of political published by year")
+
+
+
+# END
+
+
+```
+
+We use the gather function from `tidyr` to convert from a matrix into a data frame: `-document` lets us gather in all the topic labels.
+
+```{r}
+library(tidyr)
+library(ggplot2)
+allcounts = (doc.topics) %>% as.data.frame
+allcounts$document = rownames(allcounts)
+topicCounts = allcounts %>% gather(topic,proportion,-document)
+```
+
+Once the top fields are determined, you can combine things.
+
+```{r}
+clusterProportions = topicCounts %>% mutate(V1 = gsub("-.*","",document)) %>% group_by(V1,topic) %>% summarize(ratio = mean(proportion))
+
+ggplot(clusterProportions) + geom_tile(aes(x=V1,y=topic,fill=ratio)) + theme(axis.text = element_text(size = rel(1.3)))
+```
+
+Here's an example of splitting up a long text into chunks for topic modeling.
+
+``` {r}
+carol = scan("data/Dickens/A Christmas Carol.txt",what="raw",sep=" ",quote="",comment.char="")
+carol = data.frame(word=carol)
+#Use the `cut` function to divide it into 100 parts
+withBreaks = carol %>% mutate(chunk=cut(1:length(word),100))
+grouped = withBreaks %>% group_by(chunk) %>% summarize(text=paste(word,collapse=" "))
+
+```
