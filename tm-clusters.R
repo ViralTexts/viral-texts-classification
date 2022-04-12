@@ -85,4 +85,6 @@ topics_unknown <- doc.topics %>%
   mutate(doc_id = input$doc_id, primary_genre = input$genre) %>% 
   filter(primary_genre == "unknown")
 
+
+
 saveRDS(topics_unknown, file="data/unknown_topics.RData")
