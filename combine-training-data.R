@@ -23,6 +23,8 @@ recipes <- read_csv("hand-tagged/recipes.csv") %>%
   
 trainingData <- rbind(ads, info, lit, news, poetry, recipes)
 
+write_csv(trainingData, "./hand-tagged/combinedGenres.csv")
+
 
 test_data <- read_csv("./data/part-00000-e9a62088-0439-47d6-af79-3f482c36e0f7-c000.csv") %>%
   select(cluster, text) %>%
