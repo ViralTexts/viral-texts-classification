@@ -78,6 +78,8 @@ topics_known <- doc.topics %>%
   mutate(doc_id = input$doc_id, primary_genre = input$genre) %>% 
   filter(primary_genre!="unknown")
 
+write_csv(topics_known, "data/known_topics.csv")
+
 saveRDS(topics_known, file="data/known_topics.RData")
 
 topics_unknown <- doc.topics %>% 
@@ -85,6 +87,6 @@ topics_unknown <- doc.topics %>%
   mutate(doc_id = input$doc_id, primary_genre = input$genre) %>% 
   filter(primary_genre == "unknown")
 
-
+write_csv(topics_unknown, "data/unknown_topics.csv")
 
 saveRDS(topics_unknown, file="data/unknown_topics.RData")

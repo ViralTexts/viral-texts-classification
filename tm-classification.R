@@ -29,7 +29,7 @@ dim(modeling_matrix)
 unknown_matrix <- topics_unknown %>% 
   select(-primary_genre, -doc_id)
 unknown_matrix <- log(unknown_matrix)
-dim(modeling_matrix)
+dim(unknown_matrix)
 
 #Create a training set
 should_be_training <- sample(c(TRUE,FALSE),
@@ -290,7 +290,7 @@ genreRank$probability=paste(round(genreRank$probability*100,digits=2)) %>% as.nu
 
 #Histogram for genreRank
 
-sample_n_groups = function(tbl, size, replace = FALSE, weight = NULL) {
+sample_n_groups <- function(tbl, size, replace = FALSE, weight = NULL) {
   # regroup when done
   grps = tbl %>% 
     groups %>% 
