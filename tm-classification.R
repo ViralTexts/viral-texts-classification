@@ -335,7 +335,7 @@ plot <- genreRankTest %>%
 
 ggplotly(plot, 
          tooltip = c("text", "probability"))
-
+library(plotly)
 
 
 
